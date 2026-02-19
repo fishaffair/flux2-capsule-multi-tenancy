@@ -1,0 +1,15 @@
+apiVersion: capsule.clastix.io/v1beta2
+kind: ResourcePool
+metadata:
+  name: kind
+spec:
+  selectors:
+  - matchExpressions:
+    - { key: capsule.clastix.io/tenant, operator: Exists }
+  quota:
+    hard:
+      requests.storage: "1Gi"
+      limits.cpu: "1"
+      limits.memory: "1Gi"
+  config:
+    defaultsZero: true

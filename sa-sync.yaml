@@ -1,0 +1,174 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: capsule-config-sync
+  namespace: capsule-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: capsule-config-sync-role
+rules:
+- apiGroups: [""]
+  resources: ["namespaces"]
+  verbs: ["get","list"]
+- apiGroups: [""]
+  resources: ["serviceaccounts"]
+  verbs: ["get","list"]
+- apiGroups: ["capsule.clastix.io"]
+  resources: ["capsuleconfigurations"]
+  verbs: ["get","patch","update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: capsule-config-sync-binding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: capsule-config-sync-role
+subjects:
+- kind: ServiceAccount
+  name: capsule-config-sync
+  namespace: capsule-system
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: capsule-config-sync
+  namespace: capsule-system
+spec:
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 1
+  schedule: "*/2 * * * *"
+  concurrencyPolicy: "Forbid"
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          serviceAccountName: capsule-config-sync
+          restartPolicy: OnFailure
+          containers:
+          - name: sync
+            image: python:3.11-slim
+            imagePullPolicy: IfNotPresent
+            command: [ "bash", "-lc" ]
+            args:
+              - |
+                set -euo pipefail
+                pip3 install kubernetes
+                python3 /scripts/script.py
+            volumeMounts:
+            - name: script
+              mountPath: /scripts
+              readOnly: true
+          volumes:
+          - name: script
+            configMap:
+              name: script
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: script
+  namespace: capsule-system
+data:
+  script.py: |
+    #!/usr/bin/env python3
+    import logging, time, sys
+    from kubernetes import client, config
+    from kubernetes.client.rest import ApiException
+
+    CRD_GROUP = "capsule.clastix.io"
+    CRD_VERSION = "v1beta2"
+    CRD_PLURAL = "capsuleconfigurations"
+    CRD_NAME = "default"
+    NAMESPACE_TENANT_LABEL = "capsule.clastix.io/tenant"
+    SA_PROMOTE_LABEL = "owner.projectcapsule.dev/promote"
+    SA_PROMOTE_VALUE = "true"
+    MAX_RETRIES = 5
+    RETRY_BASE = 0.5
+
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s", stream=sys.stdout)
+
+    def load_config():
+        try:
+            config.load_incluster_config()
+        except Exception:
+            config.load_kube_config()
+
+    def list_promoted_sas(v1):
+        out = set()
+        for ns in v1.list_namespace().items:
+            if not (ns.metadata.labels or {}).get(NAMESPACE_TENANT_LABEL):
+                continue
+            try:
+                sas = v1.list_namespaced_service_account(ns.metadata.name, label_selector=f"{SA_PROMOTE_LABEL}={SA_PROMOTE_VALUE}").items
+            except ApiException as e:
+                logging.warning("Failed to list SAs in %s: %s", ns.metadata.name, e)
+                continue
+            for sa in sas:
+                out.add(f"system:serviceaccount:{ns.metadata.name}:{sa.metadata.name}")
+        return sorted(out)
+
+    def get_capsule(co):
+        return co.get_cluster_custom_object(group=CRD_GROUP, version=CRD_VERSION, plural=CRD_PLURAL, name=CRD_NAME)
+
+    def build_users(existing, promoted):
+        preserved = []
+        seen = set()
+        prefix = "system:serviceaccount:"
+        for e in existing:
+            if not isinstance(e, dict):
+                preserved.append(e); continue
+            k = e.get("kind"); n = e.get("name")
+            if k == "User" and isinstance(n, str) and n.startswith(prefix):
+                continue
+            preserved.append(e)
+            if isinstance(n, str):
+                seen.add(n)
+        for sa in promoted:
+            if sa in seen: continue
+            preserved.append({"kind":"User","name":sa})
+            seen.add(sa)
+        return preserved
+
+    def patch_users(co, users):
+        body = {"spec":{"users":users}}
+        for i in range(1, MAX_RETRIES+1):
+            try:
+                resp = co.patch_cluster_custom_object(group=CRD_GROUP, version=CRD_VERSION, plural=CRD_PLURAL, name=CRD_NAME, body=body)
+                logging.info("Patched CapsuleConfiguration (rv=%s)", resp.get("metadata",{}).get("resourceVersion"))
+                return True
+            except ApiException as e:
+                if e.status in (409, 429, 500) and i < MAX_RETRIES:
+                    sleep = RETRY_BASE * (2 ** (i-1))
+                    logging.warning("Patch conflict/server error %s, retrying in %.2f", e.status, sleep)
+                    time.sleep(sleep)
+                    continue
+                logging.error("Failed to patch: %s", e)
+                return False
+        return False
+
+    def main():
+        load_config()
+        v1 = client.CoreV1Api()
+        co = client.CustomObjectsApi()
+        promoted = list_promoted_sas(v1)
+        logging.info("Promoted SAs found: %d", len(promoted))
+        try:
+            cfg = get_capsule(co)
+        except ApiException as e:
+            logging.error("Cannot fetch CapsuleConfiguration: %s", e); sys.exit(1)
+        existing = cfg.get("spec", {}).get("users", []) or []
+        new_users = build_users(existing, promoted)
+        if new_users == existing:
+            logging.info("No changes required")
+            return
+        ok = patch_users(co, new_users)
+        if not ok:
+            sys.exit(2)
+
+    if __name__ == "__main__":
+        main()
+

@@ -1,0 +1,15 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: tenant-two-main
+  labels:
+    capsule.clastix.io/tenant: tenant-two
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: flux-reconciler
+  namespace: tenant-two-main
+  labels:
+    owner.projectcapsule.dev/promote: "true"

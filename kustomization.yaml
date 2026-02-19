@@ -1,0 +1,9 @@
+kind: Kustomization
+sortOptions:
+  order: fifo
+
+resources:
+ - flux-instance.yaml
+ - capsule-helmrelease.yaml
+ - tenant-sync.yaml
+ - sa-sync.yaml

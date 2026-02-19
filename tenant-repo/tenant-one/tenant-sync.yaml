@@ -1,0 +1,27 @@
+---
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: tenant-one
+  namespace: tenant-one-main
+spec:
+  interval: 2m
+  serviceAccountName: flux-reconciler
+  sourceRef:
+    kind: GitRepository
+    name: tenant-one
+  path: "./tenant-repo/tenant-one"
+  prune: true
+  timeout: 1m
+---
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: GitRepository
+metadata:
+  name: tenant-one
+  namespace: tenant-one-main
+spec:
+  interval: 5m
+  url: https://github.com/fishaffair/flux2-capsule-multi-tenancy.git
+  ref:
+    branch: main
+

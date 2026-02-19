@@ -1,0 +1,20 @@
+apiVersion: capsule.clastix.io/v1beta2
+kind: Tenant
+metadata:
+  name: tenant-two
+spec:
+  storageClasses:
+    default: "standart"
+  nodeSelector:
+    kubernetes.io/os: linux
+  ingressOptions:
+    allowWildcardHostnames: true
+    hostnameCollisionScope: Tenant
+  serviceOptions:
+    allowedServices:
+      nodePort: false
+  owners:
+  - name: tenant-two-owner
+    kind: User
+  - name: system:serviceaccount:tenant-two-main:flux-reconciler
+    kind: ServiceAccount
